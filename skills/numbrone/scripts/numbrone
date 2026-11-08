@@ -1,47 +1,50 @@
 #!/usr/bin/env bash
-# hq — a chief-of-staff workflow on top of herdr.
+# numbrone — a chief-of-staff workflow on top of herdr.
 #
 #   chief (you talk to it)  ──delegate──▶  mgr-<project>  ──spawn──▶  wk-<task>
 #        ▲                                      │  ▲                      │
 #        └────────────── report ────────────────┘  └──────── report ─────┘
 #
-# Everything is plain files in the HQ directory (the parent of this script's bin/):
+# Everything is plain files in the numbrone home folder (the parent of this script's bin/):
 #   projects.json          project index: { "<name>": { "path": ..., "summary": ... } }
 #   projects/<name>/       context.md for each project
 #   tasks/<task>.md        brief + status + append-only log, one file per task
 #   roles/                 instructions for managers and workers
-#   (workers' git worktrees live in each project, under .worktrees/)
-#   hq.conf                which agent to run, and with which arguments
+#   log/<date>.md          the daily work log: every task event, plus the chief's notes
+#   (workers' git worktrees live in each project, under .numbrone/worktrees/)
+#   numbrone.conf          which agent to run, and with which arguments
 set -euo pipefail
 
-HQ_HOME="${HQ_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+NUMBRONE_HOME="${NUMBRONE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 STATUSES="queued working blocked review done closed"
 
 usage() {
   cat <<'EOF'
-hq — chief-of-staff workflow on herdr
+numbrone — chief-of-staff workflow on herdr
 
 Setup
-  hq init <dir>                            create (or upgrade) an HQ directory
-  hq add <name> <path> "<summary>"         register a project
-  hq remove <name>                         unregister a project
-  hq projects                              list registered projects
-  hq up [name]                             start a herdr workspace + manager for each project
-  hq chief                                 mark the current agent as the chief, then show status
+  numbrone init <dir>                            create (or upgrade) a numbrone home folder
+  numbrone add <name> <path> "<summary>"         register a project
+  numbrone remove <name>                         unregister a project
+  numbrone projects                              list registered projects
+  numbrone up [name]                             start a herdr workspace + manager for each project
+  numbrone chief                                 mark the current agent as the chief, then show status
 
 Work
-  hq delegate <project> <task> "<brief>"   chief → manager: create a task and hand it over
-  hq spawn <task>                          manager → worker: worktree + tab + agent for a task
-  hq report <task> <status> "<note>"       log progress and ping whoever is one level up
-                                           status: working | blocked | review | done
-  hq status [task]                         overview of all open tasks, or one task's file
-  hq close <task>                          close the worker tab, remove its worktree (keeps the branch)
+  numbrone delegate <project> <task> "<brief>"   chief → manager: create a task and hand it over
+                                                 (a manager can also use it to create its own tasks)
+  numbrone spawn <task>                          manager → worker: worktree + tab + agent for a task
+  numbrone report <task> <status> "<note>"       log progress and ping whoever is one level up
+                                                 status: working | blocked | review | done
+  numbrone status [task]                         overview of all open tasks, or one task's file
+  numbrone close <task>                          close the worker tab, remove its worktree (keeps the branch)
+  numbrone log ["<note>"]                        add a note to today's work log, or print it
 EOF
 }
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
-die() { echo "hq: $*" >&2; exit 1; }
+die() { echo "numbrone: $*" >&2; exit 1; }
 now() { date '+%Y-%m-%d %H:%M'; }
 
 # Names become herdr agent names, which must match [a-z][a-z0-9_-]{0,31}.
@@ -51,28 +54,37 @@ check_name() { # <value> <max-length>
 }
 
 load() {
-  [ -f "$HQ_HOME/projects.json" ] || die "no HQ found at $HQ_HOME (run: hq init <dir>)"
+  [ -f "$NUMBRONE_HOME/projects.json" ] || die "no numbrone home found at $NUMBRONE_HOME (run: numbrone init <dir>)"
   command -v jq >/dev/null || die "jq is required"
   AGENT_KIND=claude AGENT_ARGS="" BASE_REF="" PING_CHIEF=1
   # shellcheck source=/dev/null
-  [ -f "$HQ_HOME/hq.conf" ] && . "$HQ_HOME/hq.conf"
+  [ -f "$NUMBRONE_HOME/numbrone.conf" ] && . "$NUMBRONE_HOME/numbrone.conf"
   return 0
 }
 
-project_path() { jq -r --arg n "$1" '.[$n].path // empty' "$HQ_HOME/projects.json"; }
-task_file()    { echo "$HQ_HOME/tasks/$1.md"; }
+project_path() { jq -r --arg n "$1" '.[$n].path // empty' "$NUMBRONE_HOME/projects.json"; }
+task_file()    { echo "$NUMBRONE_HOME/tasks/$1.md"; }
 field()        { sed -n "s/^$2: //p" "$1" | head -n1; }                # <file> <key>
 set_field()    { sed -i.bak "s|^$2:.*|$2: $3|" "$1" && rm -f "$1.bak"; } # <file> <key> <value>
-log_line()     { echo "- $(now) [$2] $3" >> "$1"; }                     # <file> <who> <text>
+log_line()     { echo "- $(now) [$2] $3" >> "$1"; journal "$2" "$(basename "$1" .md): $3"; } # <task file> <who> <text>
 
-workspace_id() { # herdr workspace labelled hq/<project>
+# The work log: one Markdown file per day in log/, appended to on every task event
+# (and by `numbrone log`). Nothing is ever rewritten, so it doubles as an audit trail.
+journal() { # <who> <text>
+  local f; f="$NUMBRONE_HOME/log/$(date +%F).md"
+  mkdir -p "$NUMBRONE_HOME/log"
+  [ -f "$f" ] || printf '# Work log %s\n\n' "$(date +%F)" > "$f"
+  echo "- $(date +%H:%M) [$1] $2" >> "$f"
+}
+
+workspace_id() { # herdr workspace labelled numbrone/<project>
   herdr workspace list |
-    jq -r --arg l "hq/$1" '.result.workspaces[] | select(.label == $l) | .workspace_id' | head -n1
+    jq -r --arg l "numbrone/$1" '.result.workspaces[] | select(.label == $l) | .workspace_id' | head -n1
 }
 agent_state() { # prints idle|working|blocked|done|unknown, or "-" if no such agent
   herdr agent get "$1" 2>/dev/null | jq -r '.result.agent.agent_status' || echo "-"
 }
-my_name() { # the herdr agent name of whoever is calling hq
+my_name() { # the herdr agent name of whoever is calling numbrone
   [ -n "${HERDR_PANE_ID:-}" ] || { echo "shell"; return; }
   herdr agent list |
     jq -r --arg p "$HERDR_PANE_ID" '[.result.agents[] | select(.pane_id == $p) | .name // empty][0] // "shell"'
@@ -84,57 +96,60 @@ start_agent() { # <name> <pane> <first prompt>
   if ! herdr agent start "$1" --kind "$AGENT_KIND" --pane "$2" --timeout 120000 -- ${args[@]+"${args[@]}"} >/dev/null 2>&1; then
     [ "$(agent_state "$1")" = blocked ] || die "could not start $1 (see: herdr pane read $2)"
     # Usually a first-run question such as "Do you trust this folder?". Only a human should answer it.
-    echo "hq: $1 is waiting at a startup prompt (e.g. 'trust this folder'). Answer it in herdr; waiting up to 5 min..." >&2
+    echo "numbrone: $1 is waiting at a startup prompt (e.g. 'trust this folder'). Answer it in herdr; waiting up to 5 min..." >&2
     herdr notification show "$1 needs you" --body "Answer its startup prompt in herdr" --sound request >/dev/null 2>&1 || true
     herdr agent wait "$1" --until idle --until done --timeout 300000 >/dev/null || die "$1 is still not ready"
   fi
-  herdr agent prompt "$1" "$3" >/dev/null
+  # Wait until the agent actually starts working. Right after startup a TUI can drop
+  # the Enter key and leave the prompt unsent in its input box; one more Enter fixes it.
+  herdr agent prompt "$1" "$3" --wait --until working --until blocked --timeout 30000 >/dev/null 2>&1 ||
+    herdr agent send-keys "$1" enter >/dev/null
 }
 
 # ── setup ──────────────────────────────────────────────────────────────────
 
 cmd_init() {
-  [ $# -eq 1 ] || die "usage: hq init <dir>"
+  [ $# -eq 1 ] || die "usage: numbrone init <dir>"
   local src dir
   src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # the skill directory
   mkdir -p "$1"; dir="$(cd "$1" && pwd)"
-  mkdir -p "$dir"/{bin,roles,tasks,projects}
+  mkdir -p "$dir"/{bin,roles,tasks,projects,log}
 
-  cp "$src/scripts/hq" "$dir/bin/hq" && chmod +x "$dir/bin/hq"
-  for f in manager.md worker.md; do
-    sed "s|{{HQ}}|$dir|g" "$src/templates/$f" > "$dir/roles/$f"
+  cp "$src/scripts/numbrone" "$dir/bin/numbrone" && chmod +x "$dir/bin/numbrone"
+  # Everything below is yours to edit (retros improve it over time), so it is only
+  # written the first time. Delete a file and re-run init to get a fresh copy.
+  for f in roles/manager.md roles/worker.md CLAUDE.md; do
+    [ -f "$dir/$f" ] || sed "s|{{NUMBRONE_HOME}}|$dir|g" "$src/templates/$(basename "$f")" > "$dir/$f"
   done
-  # User-editable files are only written the first time.
-  [ -f "$dir/CLAUDE.md" ]     || sed "s|{{HQ}}|$dir|g" "$src/templates/CLAUDE.md" > "$dir/CLAUDE.md"
   [ -e "$dir/AGENTS.md" ]     || ln -s CLAUDE.md "$dir/AGENTS.md"
-  [ -f "$dir/hq.conf" ]       || cp "$src/templates/hq.conf" "$dir/hq.conf"
+  [ -f "$dir/numbrone.conf" ] || cp "$src/templates/numbrone.conf" "$dir/numbrone.conf"
   [ -f "$dir/projects.json" ] || echo '{}' > "$dir/projects.json"
-  echo "HQ ready at $dir"
+  echo "numbrone home ready at $dir"
 }
 
 cmd_add() {
-  [ $# -eq 3 ] || die 'usage: hq add <name> <path> "<summary>"'
+  [ $# -eq 3 ] || die 'usage: numbrone add <name> <path> "<summary>"'
   load; check_name "$1" 28
   local root tmp
   root="$(git -C "$2" rev-parse --show-toplevel 2>/dev/null)" || die "$2 is not a git repository"
   tmp="$(mktemp)"
   jq --arg n "$1" --arg p "$root" --arg s "$3" '.[$n] = {path: $p, summary: $s}' \
-    "$HQ_HOME/projects.json" > "$tmp" && mv "$tmp" "$HQ_HOME/projects.json"
-  mkdir -p "$HQ_HOME/projects/$1"
+    "$NUMBRONE_HOME/projects.json" > "$tmp" && mv "$tmp" "$NUMBRONE_HOME/projects.json"
+  mkdir -p "$NUMBRONE_HOME/projects/$1"
   echo "added $1 → $root"
 }
 
 cmd_remove() {
-  [ $# -eq 1 ] || die "usage: hq remove <name>"
+  [ $# -eq 1 ] || die "usage: numbrone remove <name>"
   load
   local tmp; tmp="$(mktemp)"
-  jq --arg n "$1" 'del(.[$n])' "$HQ_HOME/projects.json" > "$tmp" && mv "$tmp" "$HQ_HOME/projects.json"
+  jq --arg n "$1" 'del(.[$n])' "$NUMBRONE_HOME/projects.json" > "$tmp" && mv "$tmp" "$NUMBRONE_HOME/projects.json"
   echo "removed $1 (its workspace and context files were left alone)"
 }
 
 cmd_projects() {
   load
-  jq -r 'to_entries[] | "\(.key)\t\(.value.path)\t\(.value.summary)"' "$HQ_HOME/projects.json" |
+  jq -r 'to_entries[] | "\(.key)\t\(.value.path)\t\(.value.summary)"' "$NUMBRONE_HOME/projects.json" |
     while IFS=$'\t' read -r name path summary; do
       printf '%-20s %-8s %s\n    %s\n' "$name" "$(agent_state "mgr-$name")" "$summary" "$path"
     done
@@ -143,19 +158,19 @@ cmd_projects() {
 cmd_up() {
   load
   local names name path ws pane
-  names="${1:-$(jq -r 'keys[]' "$HQ_HOME/projects.json")}"
+  names="${1:-$(jq -r 'keys[]' "$NUMBRONE_HOME/projects.json")}"
   for name in $names; do
     path="$(project_path "$name")"; [ -n "$path" ] || die "unknown project: $name"
     if [ "$(agent_state "mgr-$name")" != "-" ]; then echo "$name: manager already running"; continue; fi
 
     ws="$(workspace_id "$name")"
     if [ -z "$ws" ]; then
-      pane="$(herdr workspace create --cwd "$path" --label "hq/$name" --no-focus | jq -r '.result.root_pane.pane_id')"
+      pane="$(herdr workspace create --cwd "$path" --label "numbrone/$name" --no-focus | jq -r '.result.root_pane.pane_id')"
     else
       pane="$(herdr tab create --workspace "$ws" --cwd "$path" --label manager --no-focus | jq -r '.result.root_pane.pane_id')"
     fi
     start_agent "mgr-$name" "$pane" \
-      "You are the manager for project '$name'. Read $HQ_HOME/roles/manager.md and $HQ_HOME/projects/$name/context.md, then reply 'ready'."
+      "You are the manager for project '$name'. Read $NUMBRONE_HOME/roles/manager.md and $NUMBRONE_HOME/projects/$name/context.md, start any watches listed there, then reply 'ready'."
     echo "$name: started mgr-$name"
   done
 }
@@ -170,7 +185,7 @@ cmd_chief() {
 # ── work ───────────────────────────────────────────────────────────────────
 
 cmd_delegate() {
-  [ $# -eq 3 ] || die 'usage: hq delegate <project> <task> "<brief>"'
+  [ $# -eq 3 ] || die 'usage: numbrone delegate <project> <task> "<brief>"'
   load; check_name "$2" 24
   local project="$1" task="$2" brief="$3" file
   [ -n "$(project_path "$project")" ] || die "unknown project: $project"
@@ -192,6 +207,9 @@ $brief
 EOF
   log_line "$file" "$(my_name)" "queued"
 
+  # A manager creating a task for itself (e.g. from a watched source) needs no message.
+  if [ "$(my_name)" = "mgr-$project" ]; then echo "created $task; start it now (e.g. numbrone spawn $task)"; return; fi
+
   [ "$(agent_state "mgr-$project")" != "-" ] || cmd_up "$project"
   herdr agent prompt "mgr-$project" "New task '$task'. Brief: $file" >/dev/null ||
     die "task saved, but mgr-$project did not accept the message (blocked?). See: herdr agent read mgr-$project"
@@ -199,7 +217,7 @@ EOF
 }
 
 cmd_spawn() {
-  [ $# -eq 1 ] || die "usage: hq spawn <task>"
+  [ $# -eq 1 ] || die "usage: numbrone spawn <task>"
   load
   local task="$1" file project path ws wt branch pane
   file="$(task_file "$task")"; [ -f "$file" ] || die "no such task: $task"
@@ -207,12 +225,12 @@ cmd_spawn() {
   [ "$(agent_state "wk-$task")" = "-" ] || die "worker wk-$task is already running"
 
   # 1. A git worktree on its own branch, so workers never collide. It lives in
-  #    <project>/.worktrees/ (hidden via .git/info/exclude, never committed) so the
+  #    <project>/.numbrone/worktrees/ (hidden via .git/info/exclude, never committed) so the
   #    agent inherits whatever folder trust the user already gave the project.
-  wt="$path/.worktrees/$task"; branch="hq/$task"
+  wt="$path/.numbrone/worktrees/$task"; branch="numbrone/$task"
   if [ ! -d "$wt" ]; then
     local exclude; exclude="$(git -C "$path" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
-    grep -qx '.worktrees/' "$exclude" 2>/dev/null || { mkdir -p "$(dirname "$exclude")"; echo '.worktrees/' >> "$exclude"; }
+    grep -qx '.numbrone/worktrees/' "$exclude" 2>/dev/null || { mkdir -p "$(dirname "$exclude")"; echo '.numbrone/worktrees/' >> "$exclude"; }
     if git -C "$path" show-ref --verify --quiet "refs/heads/$branch"; then
       git -C "$path" worktree add -q "$wt" "$branch"
     else
@@ -221,12 +239,12 @@ cmd_spawn() {
   fi
 
   # 2. A tab in the project's workspace, rooted in that worktree.
-  ws="$(workspace_id "$project")"; [ -n "$ws" ] || die "no workspace for $project (run: hq up $project)"
+  ws="$(workspace_id "$project")"; [ -n "$ws" ] || die "no workspace for $project (run: numbrone up $project)"
   pane="$(herdr tab create --workspace "$ws" --cwd "$wt" --label "$task" --no-focus | jq -r '.result.root_pane.pane_id')"
 
   # 3. A worker agent that reads its brief. The task file is updated only once it started.
   if ! (start_agent "wk-$task" "$pane" \
-      "You are worker wk-$task. Read $HQ_HOME/roles/worker.md, then your brief at $file, and start."); then
+      "You are worker wk-$task. Read $NUMBRONE_HOME/roles/worker.md, then your brief at $file, and start."); then
     herdr tab close "$(herdr pane get "$pane" | jq -r '.result.pane.tab_id')" >/dev/null 2>&1 || true
     exit 1
   fi
@@ -238,7 +256,7 @@ cmd_spawn() {
 }
 
 cmd_report() {
-  [ $# -eq 3 ] || die 'usage: hq report <task> <status> "<note>"'
+  [ $# -eq 3 ] || die 'usage: numbrone report <task> <status> "<note>"'
   load
   local task="$1" status="$2" note="$3" file who up=""
   file="$(task_file "$task")"; [ -f "$file" ] || die "no such task: $task"
@@ -254,7 +272,7 @@ cmd_report() {
     mgr-*) [ "$PING_CHIEF" = 1 ] && up="chief" ;;
   esac
   if [ -n "$up" ] && [[ "$status" =~ ^(blocked|review|done)$ ]]; then
-    herdr agent prompt "$up" "[hq] $task is $status ($who): $note" >/dev/null 2>&1 || true
+    herdr agent prompt "$up" "[numbrone] $task is $status ($who): $note" >/dev/null 2>&1 || true
   fi
   if [[ "$status" =~ ^(blocked|review|done)$ ]]; then
     herdr notification show "$task: $status" --body "$note" \
@@ -269,7 +287,7 @@ cmd_status() {
 
   local f task status last name
   printf '%-24s %-16s %-8s %-8s %s\n' TASK PROJECT STATUS WORKER "LAST UPDATE"
-  for f in "$HQ_HOME"/tasks/*.md; do
+  for f in "$NUMBRONE_HOME"/tasks/*.md; do
     [ -e "$f" ] || continue
     task="$(basename "$f" .md)"; status="$(field "$f" status)"
     [ "$status" = closed ] && continue
@@ -278,14 +296,14 @@ cmd_status() {
   done
   echo
   printf 'managers:'
-  for name in $(jq -r 'keys[]' "$HQ_HOME/projects.json"); do
+  for name in $(jq -r 'keys[]' "$NUMBRONE_HOME/projects.json"); do
     printf ' mgr-%s=%s' "$name" "$(agent_state "mgr-$name")"
   done
   echo
 }
 
 cmd_close() {
-  [ $# -eq 1 ] || die "usage: hq close <task>"
+  [ $# -eq 1 ] || die "usage: numbrone close <task>"
   load
   local task="$1" file project path wt tab
   file="$(task_file "$task")"; [ -f "$file" ] || die "no such task: $task"
@@ -304,11 +322,17 @@ cmd_close() {
   echo "closed $task"
 }
 
+cmd_log() {
+  load
+  if [ $# -eq 0 ]; then cat "$NUMBRONE_HOME/log/$(date +%F).md" 2>/dev/null || echo "nothing logged today"
+  else journal "$(my_name)" "$*"; fi
+}
+
 # ── dispatch ───────────────────────────────────────────────────────────────
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in
-  init|add|remove|projects|up|chief|delegate|spawn|report|status|close) "cmd_$cmd" "$@" ;;
+  init|add|remove|projects|up|chief|delegate|spawn|report|status|close|log) "cmd_$cmd" "$@" ;;
   help|-h|--help) usage ;;
   *) usage; exit 2 ;;
 esac
