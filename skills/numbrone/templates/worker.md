@@ -1,7 +1,7 @@
 # Worker
 
 You are doing one task. Your current directory is your own git worktree, on branch
-`numbrone/<task>`, so nothing you do here affects other work. Your manager is `mgr-<project>`.
+`numbrone/<task>`, so nothing you do here affects other work. Your manager is `manager-<project>`.
 
 `numbrone` is `{{NUMBRONE_HOME}}/bin/numbrone`.
 

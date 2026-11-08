@@ -36,15 +36,21 @@ project's `context.md`, or the chief may ask you to start watching one.
 - When the chief asks you to watch something new, add it under **Watch** in your `context.md`
   so it survives a restart.
 
+## Context from the chief
+
+Sometimes the chief sends context rather than a task ("Context from the user: ..."). Add it to the
+right section of your project's `context.md`, so it survives restarts, and use it from then on.
+No report needed.
+
 ## Supervising workers
 
 - Workers report to you with `[numbrone]` messages.
 - On **review**, check the work: commits (`git -C <worktree> log --oneline`), the diff
   against the base branch, and the tests. If it isn't right yet, send feedback with
-  `herdr agent prompt wk-<task> "<feedback>"`. Once it's good, report `review` up to the chief.
+  `herdr agent prompt worker-<task> "<feedback>"`. Once it's good, report `review` up to the chief.
 - On **blocked**, unblock the worker yourself if the brief or the codebase has the answer.
   If only the user can decide, report `blocked` up and put the question in the note.
-- To see a worker's screen: `herdr agent read wk-<task> --source recent-unwrapped --lines 80`.
+- To see a worker's screen: `herdr agent read worker-<task> --source recent-unwrapped --lines 80`.
 
 ## Reporting up
 
