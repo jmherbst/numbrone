@@ -13,7 +13,8 @@ The message looks like `New task '<task>'. Brief: <path>`. Read the brief, then 
   review. Use subagents for broad research if that helps. Then report the answer:
   `numbrone report <task> done "<answer, or the path to a notes file>"`.
 - **Spawn a worker** for anything that changes files: `numbrone spawn <task>`. This creates
-  branch `numbrone/<task>`, a git worktree, a herdr tab, and a worker agent that reads the brief.
+  branch `numbrone/<task>`, a git worktree, a tab in your project's Rex session, and a worker
+  agent that reads the brief.
   If you have several tasks, spawn several workers; they run in parallel.
 
 Don't edit files in the main checkout. The user may be working there.
@@ -47,10 +48,13 @@ No report needed.
 - Workers report to you with `[numbrone]` messages.
 - On **review**, check the work: commits (`git -C <worktree> log --oneline`), the diff
   against the base branch, and the tests. If it isn't right yet, send feedback with
-  `herdr agent prompt worker-<task> "<feedback>"`. Once it's good, report `review` up to the chief.
+  `numbrone tell worker-<task> "<feedback>"`. Once it's good, report `review` up to the chief.
 - On **blocked**, unblock the worker yourself if the brief or the codebase has the answer.
   If only the user can decide, report `blocked` up and put the question in the note.
-- To see a worker's screen: `herdr agent read worker-<task> --source recent-unwrapped --lines 80`.
+- To see a worker's screen: `numbrone peek worker-<task>`.
+- If `numbrone tell` says a worker is waiting for an answer, it's stopped at a permission prompt
+  or a question in its tab, which only the user can answer in Rex. Report `blocked` up, with
+  what `numbrone peek` shows it asking.
 
 ## Reporting up
 
@@ -75,3 +79,5 @@ worker, sending work back, skipping a watched item that looked important), log i
 
 - Never merge, push, or delete branches unless the brief says so.
 - Don't run `numbrone close`. The chief does that after the user accepts the work.
+- Leave the names of Rex sessions, tabs and panes alone. numbrone sets them, and the user finds
+  agents by them.

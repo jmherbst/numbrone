@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# numbrone — a chief-of-staff workflow on top of herdr.
+# numbrone — a chief-of-staff workflow on top of Rex (https://www.superlogical.com/rex).
 #
 #   chief (you talk to it)  ──delegate──▶  manager-<project>  ──spawn──▶  worker-<task>
 #        ▲                                      │  ▲                      │
@@ -12,6 +12,7 @@
 #   roles/                 instructions for managers and workers
 #   log/<date>.md          the daily work log: outcomes and decisions (details stay in tasks/)
 #   knowledge/             what the chief has learned about the user's world, by topic
+#   panes/<agent>          the Rex session and pane each agent runs in (kept by this script)
 #   (workers' git worktrees live in each project, under .numbrone/worktrees/)
 #   settings.sh            which agent to run, and with which arguments
 set -euo pipefail
@@ -21,14 +22,14 @@ STATUSES="queued working blocked review done closed"
 
 usage() {
   cat <<'EOF'
-numbrone — chief-of-staff workflow on herdr
+numbrone — chief-of-staff workflow on Rex
 
 Setup
   numbrone init <folder>                         create (or upgrade) a numbrone home folder
   numbrone add <name> <path> "<summary>"         register a project
   numbrone remove <name>                         unregister a project
   numbrone projects                              list registered projects
-  numbrone up [name]                             start a herdr workspace + manager for each project
+  numbrone up [name]                             start a Rex session + manager for each project
   numbrone chief                                 mark the current agent as the chief, then show status
 
 Work
@@ -40,6 +41,10 @@ Work
   numbrone status [task]                         overview of all open tasks, or one task's file
   numbrone close <task>                          close the worker tab, remove its worktree (keeps the branch)
   numbrone log ["<note>" | <date>]               add a note to today's work log, or print a day's log
+
+Agents (chief, manager-<project>, worker-<task>)
+  numbrone tell <agent> "<message>"              type a message into an agent and submit it
+  numbrone peek <agent> [lines]                  print the end of an agent's screen (default 80 lines)
 EOF
 }
 
@@ -48,10 +53,15 @@ EOF
 die() { echo "numbrone: $*" >&2; exit 1; }
 now() { date '+%Y-%m-%d %H:%M'; }
 
-# Names become herdr agent names, which must match [a-z][a-z0-9_-]{0,31}.
+# Names become agent names (manager-<project>, worker-<task>), which label Rex panes and name files
+# in panes/, so they stay short and plain.
 check_name() { # <value> <maximum length>
   [[ "$1" =~ ^[a-z][a-z0-9-]*$ && ${#1} -le $2 ]] ||
     die "'$1' must be lowercase letters, digits and dashes, start with a letter, at most $2 characters"
+}
+check_agent() { # <agent>
+  [[ "$1" =~ ^(chief|manager-[a-z][a-z0-9-]*|worker-[a-z][a-z0-9-]*)$ ]] ||
+    die "'$1' isn't an agent name: use chief, manager-<project> or worker-<task>"
 }
 
 load() {
@@ -80,33 +90,178 @@ journal() { # <who> <text>
   echo "- $(date +%H:%M) [$1] $2" >> "$log_file"
 }
 
-workspace_id() { # herdr workspace labelled numbrone/<project>
-  herdr workspace list |
-    jq -r --arg label "numbrone/$1" '.result.workspaces[] | select(.label == $label) | .workspace_id' | head -n1
-}
-agent_state() { # prints idle|working|blocked|done|unknown, or "-" if no such agent
-  herdr agent get "$1" 2>/dev/null | jq -r '.result.agent.agent_status' || echo "-"
-}
-my_name() { # the herdr agent name of whoever is calling numbrone
-  [ -n "${HERDR_PANE_ID:-}" ] || { echo "shell"; return; }
-  herdr agent list |
-    jq -r --arg pane "$HERDR_PANE_ID" '[.result.agents[] | select(.pane_id == $pane) | .name // empty][0] // "shell"'
+# ── Rex ────────────────────────────────────────────────────────────────────
+# Every call to Rex is in this section, in the mux_* functions; nothing else in this script runs
+# `rex`. In Rex, a session holds windows (shown as tabs) and a window holds blocks (panes). Each
+# project gets a session labelled numbrone/<project>, and each agent runs in a tab of its own there,
+# in a pane labelled with the agent's name. Labels can change and needn't be unique, so the IDs of
+# each agent's session and pane are kept in panes/<agent>, as one line: "<session ID> <pane ID>".
+#
+# An agent's state comes from Rex's Program Status Protocol (OSC 7501), which Claude Code reports by
+# itself: idle, working, blocked (waiting for the user), done (finished its turn) or error.
+
+rx() { rex --autostart=false "$@"; }   # never start a Rex server as a side effect
+
+mux_require() {
+  command -v rex >/dev/null || die "the rex command is required (https://www.superlogical.com/rex/docs/installation)"
+  rx server status >/dev/null 2>&1 || die "can't reach the Rex server. Is Rex running? (check with: rex whoami)"
 }
 
-start_agent() { # <name> <pane> <first prompt>
-  local agent_arguments=()
-  [ -n "$AGENT_ARGUMENTS" ] && read -r -a agent_arguments <<< "$AGENT_ARGUMENTS"
-  if ! herdr agent start "$1" --kind "$AGENT_KIND" --pane "$2" --timeout 120000 -- ${agent_arguments[@]+"${agent_arguments[@]}"} >/dev/null 2>&1; then
-    [ "$(agent_state "$1")" = blocked ] || die "could not start $1 (see: herdr pane read $2)"
-    # Usually a first-run question such as "Do you trust this folder?". Only a human should answer it.
-    echo "numbrone: $1 is waiting at a startup prompt (for example 'trust this folder'). Answer it in herdr; waiting up to 5 minutes..." >&2
-    herdr notification show "$1 needs you" --body "Answer its startup prompt in herdr" --sound request >/dev/null 2>&1 || true
-    herdr agent wait "$1" --until idle --until done --timeout 300000 >/dev/null || die "$1 is still not ready"
+pane_file() { echo "$NUMBRONE_HOME/panes/$1"; }
+pane_of() { # <agent>: read the agent's IDs into the caller's $session and $block
+  [ -f "$(pane_file "$1")" ] && read -r session block < "$(pane_file "$1")"
+}
+
+mux_register() { # <agent> <session> <pane>
+  local file
+  mkdir -p "$NUMBRONE_HOME/panes"
+  for file in "$NUMBRONE_HOME"/panes/*; do # a pane holds one agent: forget any other name for it
+    if [ -f "$file" ] && grep -qF " $3" "$file"; then rm -f "$file"; fi
+  done
+  echo "$2 $3" > "$(pane_file "$1")"
+}
+
+mux_state() { # <agent>: idle|working|blocked|done|error, unknown if it hasn't reported one, or "-" if it isn't running
+  local session block records state
+  pane_of "$1" || { echo -; return; }
+  records="$(rx block call -s "$session" -b "$block" program_status 2>/dev/null)" || { echo -; return; }
+  state="$(jq -r '[.records[] | select(.id == null)][0].state // empty' <<< "$records" 2>/dev/null)" || state=""
+  if [ -z "$state" ]; then
+    # Nothing reported yet: the agent is starting, waiting at a startup prompt, or it has exited.
+    if rx block call -s "$session" -b "$block" process 2>/dev/null | jq -e '.last_exit == null' >/dev/null; then
+      state=unknown
+    else
+      state=-
+    fi
   fi
-  # Wait until the agent actually starts working. Right after startup a terminal interface can drop
-  # the Enter key and leave the prompt unsent in its input box; one more Enter fixes it.
-  herdr agent prompt "$1" "$3" --wait --until working --until blocked --timeout 30000 >/dev/null 2>&1 ||
-    herdr agent send-keys "$1" enter >/dev/null
+  echo "$state"
+}
+
+mux_wait_for() { # <agent> <seconds> <state>...: wait until the agent reports one of these states
+  local agent="$1" deadline=$((SECONDS + $2)) state
+  shift 2
+  while :; do
+    state="$(mux_state "$agent")"
+    [[ " $* " == *" $state "* ]] && return 0
+    if [ "$state" = - ] || [ $SECONDS -ge $deadline ]; then return 1; fi
+    sleep 0.5
+  done
+}
+
+mux_session() { # <project>: the ID of the project's Rex session, if there is one
+  local session block
+  # The session the manager runs in, even if it was renamed; otherwise the one with the project's label.
+  if pane_of "manager-$1" && rx session inspect "$session" --json >/dev/null 2>&1; then echo "$session"; return; fi
+  rx session ls --json 2>/dev/null |
+    jq -r --arg label "numbrone/$1" '[.sessions[] | select(.label == $label) | .session_id][0] // empty' || true
+}
+
+mux_open() { # <session, or "" for a new one> <project> <tab> <cwd> <agent> <command...>: run an agent in a new tab
+  local session="$1" project="$2" tab="$3" cwd="$4" agent="$5" created block
+  shift 5
+  if [ -z "$session" ]; then
+    created="$(rx new "numbrone/$project" --window "$tab" -c "$cwd" --json -- "$@")" || return 1
+    session="$(jq -r '.session_id' <<< "$created")"
+    block="$(jq -r '.initial_windows[0].block_ids[0]' <<< "$created")"
+  else
+    rx session rename "$session" "numbrone/$project" >/dev/null 2>&1 || true # in case an agent renamed it
+    created="$(rx window new -s "$session" "$tab" -c "$cwd" --focus=false --json -- "$@")" || return 1
+    block="$(jq -r '.block_ids[0]' <<< "$created")"
+  fi
+  mux_register "$agent" "$session" "$block"
+  rx block rename -s "$session" "$block" "$agent" >/dev/null 2>&1 || true
+}
+
+mux_prompt() { # <agent> <text>: type a message into an agent and submit it; fails if the agent can't take it now
+  local session block state
+  state="$(mux_state "$1")"
+  case "$state" in
+    -)       echo "numbrone: $1 isn't running" >&2; return 1 ;;
+    # Typing into a question or permission prompt could answer it, so leave those to a human.
+    blocked) echo "numbrone: $1 is waiting for an answer in Rex, so it can't take a message now" >&2; return 1 ;;
+    unknown) echo "numbrone: $1 hasn't reported a status yet (it may be at a startup prompt such as 'trust this folder'), so it can't take a message now" >&2; return 1 ;;
+  esac
+  pane_of "$1" || return 1
+  # A paste keeps a message of several lines in one piece, and Enter submits it. A busy agent queues it.
+  jq -n --arg session "$session" --arg block "$block" --arg text "$2" \
+      '{session_id: $session, block_id: $block, event: {type: "paste", payload: {text: $text}}}' |
+    rx api call block.event - >/dev/null || return 1
+  rx send-key -s "$session" -b "$block" enter >/dev/null || return 1
+  # An agent at rest starts working at once. If it doesn't, the Enter was probably lost while the
+  # agent redrew its screen, so press it once more. In an empty input box, Enter does nothing.
+  if [ "$state" != working ] && ! mux_wait_for "$1" 10 working blocked; then
+    rx send-key -s "$session" -b "$block" enter >/dev/null 2>&1 || true
+  fi
+}
+
+mux_read() { # <agent> <lines>: print the end of the agent's screen
+  local session block
+  pane_of "$1" || return 1
+  rx capture -s "$session" -b "$block" --unwrap --trim 2>/dev/null | tail -n "$2"
+}
+
+mux_close() { # <agent>: close the agent's tab, and forget its pane
+  local session block window
+  if pane_of "$1"; then
+    window="$(rx block inspect -s "$session" "$block" --json 2>/dev/null | jq -r '.block.window_id // empty')" || window=""
+    if [ -n "$window" ]; then rx window close -s "$session" "$window" >/dev/null 2>&1 || true; fi
+  fi
+  rm -f "$(pane_file "$1")"
+}
+
+mux_claim() { # <agent>: give the pane numbrone was called from this agent's name
+  [ -n "${REX_SESSION:-}" ] && [ -n "${REX_BLOCK:-}" ] || return 1
+  rx block rename -s "$REX_SESSION" "$REX_BLOCK" "$1" >/dev/null || return 1
+  mux_register "$1" "$REX_SESSION" "$REX_BLOCK"
+}
+
+mux_whoami() { # the name of the agent that called numbrone, or "shell"
+  local file
+  if [ -n "${REX_BLOCK:-}" ]; then
+    for file in "$NUMBRONE_HOME"/panes/*; do
+      if [ -f "$file" ] && grep -qF " $REX_BLOCK" "$file"; then basename "$file"; return; fi
+    done
+  fi
+  echo shell
+}
+
+mux_notify() { # <title> <body>: a desktop notification, shown by Rex as coming from the caller's pane
+  # Rex turns OSC 777 into a notification (Settings > Notifications > Terminal notifications). numbrone
+  # usually runs in an agent's tool call, which has no terminal of its own, so this writes to the
+  # agent's: the terminal of the nearest ancestor process that has one.
+  [ -n "${REX_BLOCK:-}" ] || return 0
+  local pid=$$ tty="" hops=0
+  while [ $hops -lt 16 ] && [ "${pid:-0}" -gt 1 ]; do
+    tty="$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')" || tty=""
+    case "$tty" in ''|'?'|'??') ;; *) break ;; esac
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" || pid=0
+    hops=$((hops + 1))
+  done
+  case "$tty" in ''|'?'|'??') return 0 ;; esac
+  [ -w "/dev/$tty" ] || return 0
+  printf '\033]777;notify;%s;%s\033\\' "$(one_line "$1" | tr ';' ',')" "$(one_line "$2")" > "/dev/$tty" 2>/dev/null || true
+}
+one_line() { printf '%s' "$1" | tr '\n\t' '  ' | tr -d '\000-\037\177'; } # no control characters
+
+# ── agents ─────────────────────────────────────────────────────────────────
+
+start_agent() { # <session, or ""> <project> <tab> <cwd> <agent> <first prompt>
+  local session="$1" project="$2" tab="$3" cwd="$4" agent="$5" prompt="$6" arguments=() run=()
+  [ -n "$AGENT_ARGUMENTS" ] && read -r -a arguments <<< "$AGENT_ARGUMENTS"
+  run=("$AGENT_KIND" ${arguments[@]+"${arguments[@]}"})
+  # Claude Code and Codex take the first prompt as an argument and run it as soon as they're ready,
+  # even when they stop at a startup prompt first. Other agents get it typed in once they report a status.
+  case "$AGENT_KIND" in claude|codex) run+=("$prompt") ;; esac
+  mux_open "$session" "$project" "$tab" "$cwd" "$agent" "${run[@]}" || die "could not open a tab for $agent in Rex"
+
+  if ! mux_wait_for "$agent" 30 idle working blocked "done" error; then
+    [ "$(mux_state "$agent")" != - ] || die "$agent exited as soon as it started (is AGENT_KIND=$AGENT_KIND right?)"
+    # Usually a first-run question such as "Do you trust this folder?". Only a human should answer it.
+    echo "numbrone: $agent is waiting at a startup prompt (for example 'trust this folder'). Answer it in Rex (session numbrone/$project, tab $tab); waiting up to 5 minutes..." >&2
+    mux_notify "$agent needs you" "Answer its startup prompt in Rex: session numbrone/$project, tab $tab"
+    mux_wait_for "$agent" 300 idle working blocked "done" error || die "$agent is still not ready"
+  fi
+  case "$AGENT_KIND" in claude|codex) ;; *) mux_prompt "$agent" "$prompt" || die "$agent did not take its first prompt" ;; esac
 }
 
 # ── setup ──────────────────────────────────────────────────────────────────
@@ -116,7 +271,7 @@ command_init() {
   local skill_folder home
   skill_folder="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # the skill directory
   mkdir -p "$1"; home="$(cd "$1" && pwd)"
-  mkdir -p "$home"/{bin,roles,tasks,projects,log,knowledge}
+  mkdir -p "$home"/{bin,roles,tasks,projects,log,knowledge,panes}
 
   cp "$skill_folder/scripts/numbrone" "$home/bin/numbrone" && chmod +x "$home/bin/numbrone"
   # Everything below is yours to edit (retros improve it over time), so it is only
@@ -148,40 +303,36 @@ command_remove() {
   load
   local temporary_file; temporary_file="$(mktemp)"
   jq --arg name "$1" 'del(.[$name])' "$NUMBRONE_HOME/projects.json" > "$temporary_file" && mv "$temporary_file" "$NUMBRONE_HOME/projects.json"
-  echo "removed $1 (its workspace and context files were left alone)"
+  echo "removed $1 (its Rex session and context files were left alone)"
 }
 
 command_projects() {
   load
   jq -r 'to_entries[] | "\(.key)\t\(.value.path)\t\(.value.summary)"' "$NUMBRONE_HOME/projects.json" |
     while IFS=$'\t' read -r name path summary; do
-      printf '%-20s %-8s %s\n    %s\n' "$name" "$(agent_state "manager-$name")" "$summary" "$path"
+      printf '%-20s %-8s %s\n    %s\n' "$name" "$(mux_state "manager-$name")" "$summary" "$path"
     done
 }
 
 command_up() {
-  load
-  local names name path workspace pane
+  load; mux_require
+  local names name path
   names="${1:-$(jq -r 'keys[]' "$NUMBRONE_HOME/projects.json")}"
   for name in $names; do
     path="$(project_path "$name")"; [ -n "$path" ] || die "unknown project: $name"
-    if [ "$(agent_state "manager-$name")" != "-" ]; then echo "$name: manager already running"; continue; fi
-
-    workspace="$(workspace_id "$name")"
-    if [ -z "$workspace" ]; then
-      pane="$(herdr workspace create --cwd "$path" --label "numbrone/$name" --no-focus | jq -r '.result.root_pane.pane_id')"
-    else
-      pane="$(herdr tab create --workspace "$workspace" --cwd "$path" --label manager --no-focus | jq -r '.result.root_pane.pane_id')"
-    fi
-    start_agent "manager-$name" "$pane" \
-      "You are the manager for project '$name'. Read $NUMBRONE_HOME/roles/manager.md and $NUMBRONE_HOME/projects/$name/context.md, start any watches listed there, then reply 'ready'."
+    if [ "$(mux_state "manager-$name")" != "-" ]; then echo "$name: manager already running"; continue; fi
+    # The project's Rex session (numbrone/<project>) is created with the manager's tab if it doesn't exist.
+    start_agent "$(mux_session "$name")" "$name" manager "$path" "manager-$name" \
+      "You are the manager for project '$name'. Read $NUMBRONE_HOME/roles/manager.md and $NUMBRONE_HOME/projects/$name/context.md, start any watches listed there, then reply 'ready'. numbrone names your Rex session, tab and pane, so leave those names as they are."
     echo "$name: started manager-$name"
   done
 }
 
 command_chief() {
-  [ -n "${HERDR_PANE_ID:-}" ] || die "run this from the chief's agent inside herdr"
-  herdr agent rename "$HERDR_PANE_ID" chief >/dev/null
+  load
+  [ -n "${REX_BLOCK:-}" ] || die "run this from the chief's agent inside Rex"
+  mux_require
+  mux_claim chief || die "could not label this pane in Rex"
   echo "this agent is now 'chief'"
   command_status
 }
@@ -209,24 +360,24 @@ $brief
 
 ## Log
 EOF
-  log_line "$file" "$(my_name)" "queued for $project"
+  log_line "$file" "$(mux_whoami)" "queued for $project"
 
   # A manager creating a task for itself (for example from a watched source) needs no message.
-  if [ "$(my_name)" = "manager-$project" ]; then echo "created $task; start it now (for example numbrone spawn $task)"; return; fi
+  if [ "$(mux_whoami)" = "manager-$project" ]; then echo "created $task; start it now (for example numbrone spawn $task)"; return; fi
 
-  [ "$(agent_state "manager-$project")" != "-" ] || command_up "$project"
-  herdr agent prompt "manager-$project" "New task '$task'. Brief: $file" >/dev/null ||
-    die "task saved, but manager-$project did not accept the message (blocked?). See: herdr agent read manager-$project"
+  [ "$(mux_state "manager-$project")" != "-" ] || command_up "$project"
+  mux_prompt "manager-$project" "New task '$task'. Brief: $file" ||
+    die "task saved, but manager-$project did not take the message. See: numbrone peek manager-$project"
   echo "delegated $task → manager-$project"
 }
 
 command_spawn() {
   [ $# -eq 1 ] || die "usage: numbrone spawn <task>"
-  load
-  local task="$1" file project path workspace worktree branch pane
+  load; mux_require
+  local task="$1" file project path session worktree branch
   file="$(task_file "$task")"; [ -f "$file" ] || die "no such task: $task"
   project="$(field "$file" project)"; path="$(project_path "$project")"
-  [ "$(agent_state "worker-$task")" = "-" ] || die "worker-$task is already running"
+  [ "$(mux_state "worker-$task")" = "-" ] || die "worker-$task is already running"
 
   # 1. A git worktree on its own branch, so workers never collide. It lives in
   #    <project>/.numbrone/worktrees/ (hidden via .git/info/exclude, never committed) so the
@@ -242,20 +393,18 @@ command_spawn() {
     fi
   fi
 
-  # 2. A tab in the project's workspace, rooted in that worktree.
-  workspace="$(workspace_id "$project")"; [ -n "$workspace" ] || die "no workspace for $project (run: numbrone up $project)"
-  pane="$(herdr tab create --workspace "$workspace" --cwd "$worktree" --label "$task" --no-focus | jq -r '.result.root_pane.pane_id')"
-
-  # 3. A worker agent that reads its brief. The task file is updated only once it started.
-  if ! (start_agent "worker-$task" "$pane" \
-      "You are worker-$task. Read $NUMBRONE_HOME/roles/worker.md, then your brief at $file, and start."); then
-    herdr tab close "$(herdr pane get "$pane" | jq -r '.result.pane.tab_id')" >/dev/null 2>&1 || true
+  # 2. A tab in the project's Rex session, rooted in that worktree, running a worker agent that
+  #    reads its brief. The task file is updated only once the worker started.
+  session="$(mux_session "$project")"; [ -n "$session" ] || die "no Rex session for $project (run: numbrone up $project)"
+  if ! (start_agent "$session" "$project" "$task" "$worktree" "worker-$task" \
+      "You are worker-$task. Read $NUMBRONE_HOME/roles/worker.md, then your brief at $file, and start. numbrone names your Rex session, tab and pane, so leave those names as they are."); then
+    mux_close "worker-$task"
     exit 1
   fi
   set_field "$file" status working
   set_field "$file" branch "$branch"
   set_field "$file" worktree "$worktree"
-  task_log "$file" "$(my_name)" "spawned worker-$task on $branch"
+  task_log "$file" "$(mux_whoami)" "spawned worker-$task on $branch"
   echo "spawned worker-$task in $worktree"
 }
 
@@ -265,7 +414,7 @@ command_report() {
   local task="$1" status="$2" note="$3" file who up=""
   file="$(task_file "$task")"; [ -f "$file" ] || die "no such task: $task"
   [[ " $STATUSES " == *" $status "* ]] || die "status must be one of: $STATUSES"
-  who="$(my_name)"
+  who="$(mux_whoami)"
 
   set_field "$file" status "$status"
   # Workers report to their manager, and the manager's report is the one that counts, so only
@@ -279,11 +428,11 @@ command_report() {
     manager-*) [ "$PING_CHIEF" = 1 ] && up="chief" ;;
   esac
   if [ -n "$up" ] && [[ "$status" =~ ^(blocked|review|done)$ ]]; then
-    herdr agent prompt "$up" "[numbrone] $task is $status ($who): $note" >/dev/null 2>&1 || true
+    mux_prompt "$up" "[numbrone] $task is $status ($who): $note" ||
+      echo "numbrone: the report didn't reach $up; it's in $file" >&2
   fi
   if [[ "$status" =~ ^(blocked|review|done)$ ]]; then
-    herdr notification show "$task: $status" --body "$note" \
-      --sound "$([ "$status" = blocked ] && echo request || echo done)" >/dev/null 2>&1 || true
+    mux_notify "$task: $status" "$note"
   fi
   echo "reported $task: $status"
 }
@@ -299,12 +448,12 @@ command_status() {
     task="$(basename "$file" .md)"; status="$(field "$file" status)"
     [ "$status" = closed ] && continue
     last="$(grep '^- ' "$file" | tail -n1 | cut -c3- | cut -c1-70)"
-    printf '%-24s %-16s %-8s %-8s %s\n' "$task" "$(field "$file" project)" "$status" "$(agent_state "worker-$task")" "$last"
+    printf '%-24s %-16s %-8s %-8s %s\n' "$task" "$(field "$file" project)" "$status" "$(mux_state "worker-$task")" "$last"
   done
   echo
   printf 'managers:'
   for name in $(jq -r 'keys[]' "$NUMBRONE_HOME/projects.json"); do
-    printf ' manager-%s=%s' "$name" "$(agent_state "manager-$name")"
+    printf ' manager-%s=%s' "$name" "$(mux_state "manager-$name")"
   done
   echo
 }
@@ -312,7 +461,7 @@ command_status() {
 command_close() {
   [ $# -eq 1 ] || die "usage: numbrone close <task>"
   load
-  local task="$1" file project path worktree tab
+  local task="$1" file project path worktree
   file="$(task_file "$task")"; [ -f "$file" ] || die "no such task: $task"
   project="$(field "$file" project)"; path="$(project_path "$project")"; worktree="$(field "$file" worktree)"
 
@@ -320,12 +469,11 @@ command_close() {
   if [ -n "$worktree" ] && [ -d "$worktree" ] && [ -n "$(git -C "$worktree" status --porcelain)" ]; then
     die "$worktree has uncommitted changes; commit or discard them first"
   fi
-  tab="$(herdr agent get "worker-$task" 2>/dev/null | jq -r '.result.agent.tab_id')" || tab=""
-  [ -n "$tab" ] && herdr tab close "$tab" >/dev/null
+  mux_close "worker-$task"
   [ -n "$worktree" ] && [ -d "$worktree" ] && git -C "$path" worktree remove "$worktree"
 
   set_field "$file" status closed
-  log_line "$file" "$(my_name)" "closed (branch $(field "$file" branch) kept)"
+  log_line "$file" "$(mux_whoami)" "closed (branch $(field "$file" branch) kept)"
   echo "closed $task"
 }
 
@@ -334,14 +482,30 @@ command_log() {
   local day="${1:-$(date +%F)}"
   if [ $# -eq 0 ] || [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
     cat "$NUMBRONE_HOME/log/$day.md" 2>/dev/null || echo "nothing logged on $day"
-  else journal "$(my_name)" "$*"; fi
+  else journal "$(mux_whoami)" "$*"; fi
+}
+
+# ── talking to agents ──────────────────────────────────────────────────────
+
+command_tell() {
+  [ $# -eq 2 ] || die 'usage: numbrone tell <agent> "<message>"'
+  load; check_agent "$1"; mux_require
+  mux_prompt "$1" "$2" || exit 1
+  echo "sent to $1"
+}
+
+command_peek() {
+  [ $# -eq 1 ] || [ $# -eq 2 ] || die "usage: numbrone peek <agent> [lines]"
+  load; check_agent "$1"; mux_require
+  [[ "${2:-80}" =~ ^[0-9]+$ ]] || die "lines must be a number"
+  mux_read "$1" "${2:-80}" || die "$1 isn't running"
 }
 
 # ── dispatch ───────────────────────────────────────────────────────────────
 
 command="${1:-help}"; shift || true
 case "$command" in
-  init|add|remove|projects|up|chief|delegate|spawn|report|status|close|log) "command_$command" "$@" ;;
+  init|add|remove|projects|up|chief|delegate|spawn|report|status|close|log|tell|peek) "command_$command" "$@" ;;
   help|-h|--help) usage ;;
   *) usage; exit 2 ;;
 esac

@@ -20,3 +20,5 @@ Your manager may send feedback. Address it, commit, and report `review` again.
 
 - Stay inside your worktree.
 - Don't push, merge, or touch other branches unless the brief says so.
+- Leave the names of your Rex session, tab and pane alone. numbrone sets them, and the user
+  finds agents by them.

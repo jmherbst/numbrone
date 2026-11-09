@@ -1,6 +1,6 @@
 ---
 name: numbrone
-description: Set up a "chief of staff" workflow on herdr. One chief agent routes requests to a manager agent per project, and managers run workers in git worktrees and herdr tabs, all in parallel. Use when the user asks to set up numbrone, a chief of staff or multi-project agent workflow on herdr, or to add a project to an existing numbrone setup.
+description: Set up a "chief of staff" workflow on Rex. One chief agent routes requests to a manager agent per project, and managers run workers in git worktrees and Rex tabs, all in parallel. Use when the user asks to set up numbrone, a chief of staff or multi-project agent workflow on Rex, or to add a project to an existing numbrone setup.
 ---
 
 # numbrone setup
@@ -9,9 +9,9 @@ You are setting up a workflow where:
 
 - the **chief of staff** (an agent in the numbrone home folder) takes the user's requests, works out
   which project each belongs to, and delegates;
-- each project has a **manager** agent in its own herdr workspace (`numbrone/<project>`);
+- each project has a **manager** agent in its own Rex session (`numbrone/<project>`);
 - managers answer small things themselves and spawn **workers** for code changes. Each worker
-  gets its own git worktree, its own tab in the project's workspace, and its own branch;
+  gets its own git worktree, its own tab in the project's session, and its own branch;
 - workers report to their manager, and managers report to the chief;
 - a daily Markdown work log records outcomes and decisions across all teams, for audits and retros;
 - the chief builds up the user's context over time in `knowledge/`, and uses it to delegate and judge work.
@@ -24,17 +24,19 @@ arguments to see its commands. Do the steps below in order. Keep the user inform
 Run these checks and fix or report anything missing before continuing:
 
 ```bash
-test "${HERDR_ENV:-}" = 1 && echo "inside herdr"   # must be inside a herdr pane
-herdr status                                       # server must be running
+test -n "${REX_SESSION:-}" && echo "inside Rex"    # must be inside a Rex terminal
+rex server status                                  # server must be reachable
 command -v git jq
-herdr integration status | grep -E '^claude:'      # or the agent the user wants to use
+rex block call -s "$REX_SESSION" -b "$REX_BLOCK" program_status   # this agent reports its state to Rex
 ```
 
-- Not inside herdr: tell the user to install herdr (`curl -fsSL https://herdr.dev/install.sh | sh`),
-  run `herdr`, start their agent in a pane, and run this skill again. Then stop.
+- Not inside Rex: tell the user numbrone runs on Rex (in beta; see
+  https://www.superlogical.com/rex/docs/installation), and to open Rex, start their agent in a Rex
+  terminal, and run this skill again. Then stop.
 - `jq` missing: suggest `brew install jq` or `apt install jq`.
-- Integration not installed: offer `herdr integration install claude` (or their agent's kind).
-  Ask before running it, because it writes to the agent's configuration.
+- `program_status` lists no record: this agent doesn't report its state (working, idle, waiting)
+  to Rex, so numbrone couldn't follow managers and workers running it. Claude Code reports it by
+  itself; ask the user to update it (`claude update`). Then stop.
 
 ## 2. Create the numbrone home folder
 
@@ -128,9 +130,11 @@ time just by telling it things.
 Open `<numbrone-home>/settings.sh` and confirm two settings with the user:
 
 - `AGENT_KIND`: which agent runs managers and workers (default `claude`).
-- `AGENT_ARGUMENTS`: workers stop at every permission prompt and show as `blocked` in herdr. If
+- `AGENT_ARGUMENTS`: workers stop at every permission prompt and show as `blocked` in Rex. If
   the user wants fewer interruptions, for Claude Code they can set
   `AGENT_ARGUMENTS="--permission-mode acceptEdits"`. This is their choice; don't pick it for them.
+  Rex starts agents with the login shell's environment, so shell aliases don't apply. If the user
+  runs their agent through an alias that adds flags, ask whether those flags belong here too.
 
 ## 8. Start the managers
 
@@ -138,14 +142,16 @@ Open `<numbrone-home>/settings.sh` and confirm two settings with the user:
 <numbrone-home>/bin/numbrone up
 ```
 
-This creates one herdr workspace per project (`numbrone/<name>`, in the background) and starts
-`manager-<name>` in it. Check `numbrone projects`: every manager should show `idle` or `done`.
+This creates one Rex session per project (`numbrone/<name>`, in the background) and starts
+`manager-<name>` in a tab there. The first time Claude Code opens a project, it asks whether the
+user trusts the folder; `numbrone up` says so and waits up to 5 minutes for the user to answer it
+in that tab. Check `numbrone projects`: every manager should show `working`, `idle` or `done`.
 
 ## 9. Hand over
 
 Tell the user how to start their chief of staff:
 
-> In herdr, open a pane (or a workspace) in `<numbrone-home>` and start your agent there
+> In Rex, open a terminal (a new tab or session) in `<numbrone-home>` and start your agent there
 > (`cd <numbrone-home> && claude`). It reads `CLAUDE.md`, runs `numbrone chief`, and from then on you
 > give it requests in plain language, such as "add rate limiting to the api". It routes each one,
 > delegates it, and reports back as managers make progress.
