@@ -10,7 +10,7 @@
 #   projects/<name>/       context.md for each project
 #   tasks/<task>.md        brief + status + append-only log, one file per task
 #   roles/                 instructions for managers and workers
-#   log/<date>.md          the daily work log: every task event, plus the chief's notes
+#   log/<date>.md          the daily work log: outcomes and decisions (details stay in tasks/)
 #   knowledge/             what the chief has learned about the user's world, by topic
 #   (workers' git worktrees live in each project, under .numbrone/worktrees/)
 #   settings.sh            which agent to run, and with which arguments
@@ -39,7 +39,7 @@ Work
                                                  status: working | blocked | review | done
   numbrone status [task]                         overview of all open tasks, or one task's file
   numbrone close <task>                          close the worker tab, remove its worktree (keeps the branch)
-  numbrone log ["<note>"]                        add a note to today's work log, or print it
+  numbrone log ["<note>" | <date>]               add a note to today's work log, or print a day's log
 EOF
 }
 
@@ -67,10 +67,12 @@ project_path() { jq -r --arg name "$1" '.[$name].path // empty' "$NUMBRONE_HOME/
 task_file()    { echo "$NUMBRONE_HOME/tasks/$1.md"; }
 field()        { sed -n "s/^$2: //p" "$1" | head -n1; }                # <file> <key>
 set_field()    { sed -i.backup "s|^$2:.*|$2: $3|" "$1" && rm -f "$1.backup"; } # <file> <key> <value>
-log_line()     { echo "- $(now) [$2] $3" >> "$1"; journal "$2" "$(basename "$1" .md): $3"; } # <task file> <who> <text>
+task_log()     { echo "- $(now) [$2] $3" >> "$1"; }                     # <task file> <who> <text>
+log_line()     { task_log "$@"; journal "$2" "$(basename "$1" .md): $3"; } # same, and into the work log
 
-# The work log: one Markdown file per day in log/, appended to on every task event
-# (and by `numbrone log`). Nothing is ever rewritten, so it doubles as an audit trail.
+# The work log: one Markdown file per day in log/. It records outcomes and decisions only:
+# tasks queued, blocked, delivered and closed, plus notes added with `numbrone log`.
+# Step-by-step progress stays in each task file. Nothing is ever rewritten, so it's an audit trail.
 journal() { # <who> <text>
   local log_file; log_file="$NUMBRONE_HOME/log/$(date +%F).md"
   mkdir -p "$NUMBRONE_HOME/log"
@@ -207,7 +209,7 @@ $brief
 
 ## Log
 EOF
-  log_line "$file" "$(my_name)" "queued"
+  log_line "$file" "$(my_name)" "queued for $project"
 
   # A manager creating a task for itself (for example from a watched source) needs no message.
   if [ "$(my_name)" = "manager-$project" ]; then echo "created $task; start it now (for example numbrone spawn $task)"; return; fi
@@ -253,7 +255,7 @@ command_spawn() {
   set_field "$file" status working
   set_field "$file" branch "$branch"
   set_field "$file" worktree "$worktree"
-  log_line "$file" "$(my_name)" "spawned worker-$task on $branch"
+  task_log "$file" "$(my_name)" "spawned worker-$task on $branch"
   echo "spawned worker-$task in $worktree"
 }
 
@@ -266,7 +268,10 @@ command_report() {
   who="$(my_name)"
 
   set_field "$file" status "$status"
-  log_line "$file" "$who" "$status: $note"
+  # Workers report to their manager, and the manager's report is the one that counts, so only
+  # managers' and the chief's status changes go into the work log. Everything stays in the task file.
+  if [[ "$who" == worker-* || "$status" == working ]]; then task_log "$file" "$who" "$status: $note"
+  else log_line "$file" "$who" "$status: $note"; fi
 
   # Ping one level up: worker → its manager, manager → chief.
   case "$who" in
@@ -326,7 +331,9 @@ command_close() {
 
 command_log() {
   load
-  if [ $# -eq 0 ]; then cat "$NUMBRONE_HOME/log/$(date +%F).md" 2>/dev/null || echo "nothing logged today"
+  local day="${1:-$(date +%F)}"
+  if [ $# -eq 0 ] || [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    cat "$NUMBRONE_HOME/log/$day.md" 2>/dev/null || echo "nothing logged on $day"
   else journal "$(my_name)" "$*"; fi
 }
 

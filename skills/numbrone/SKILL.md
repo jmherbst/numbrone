@@ -13,7 +13,7 @@ You are setting up a workflow where:
 - managers answer small things themselves and spawn **workers** for code changes. Each worker
   gets its own git worktree, its own tab in the project's workspace, and its own branch;
 - workers report to their manager, and managers report to the chief;
-- every event lands in a daily Markdown work log, and the chief adds outcome notes for audits and retros;
+- a daily Markdown work log records outcomes and decisions across all teams, for audits and retros;
 - the chief builds up the user's context over time in `knowledge/`, and uses it to delegate and judge work.
 
 All the mechanics live in one script, `scripts/numbrone` in this skill's directory. Run it with no

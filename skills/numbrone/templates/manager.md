@@ -63,7 +63,13 @@ No report needed.
 | `review` | Ready for the user: branch, what changed, how to try it |
 | `done` | Finished, and the user doesn't need to do anything |
 
-Report when the status changes, not after every step.
+Report when the status changes, not after every step. Your `blocked`, `review` and `done`
+reports go into the daily work log, the record of what got done. Write them so they make sense
+a month from now: what was delivered or what's needed, not what you did along the way.
+
+When you make a real decision on the user's behalf (choosing between approaches to unblock a
+worker, sending work back, skipping a watched item that looked important), log it in one line:
+`numbrone log "decision: <task>: <what you decided and why>"`.
 
 ## Rules
 

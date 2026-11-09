@@ -8,6 +8,8 @@ It works out which of your projects each request belongs to and hands it to that
 manager. The manager runs workers in parallel, each in its own git worktree, and everyone
 reports back up. All of it runs in [herdr](https://herdr.dev), so you can watch any agent at any time.
 
+We all need a numbrone at work. This is yours.
+
 ```
             you, or sources the chief watches (Linear, GitHub issues, ...)
                         │  "add rate limiting to the api"
@@ -188,27 +190,42 @@ done, it adds one line to the **Learned** section of `~/.numbrone/CLAUDE.md`, wh
 session reads first. Early on (until it has about ten lessons), it asks you a short question
 after each finished task to calibrate faster. You can edit **Learned** yourself at any time.
 
+**Learned** is kept short on purpose: the chief merges overlapping lessons, replaces ones that
+no longer hold, and moves project-specific detail into that project's `context.md`. The work log
+keeps the full history of your feedback.
+
 ## Work log
 
-Everything that happens is written to `~/.numbrone/log/<date>.md`, one Markdown file per day.
-The script appends every event as it happens: queued, spawned, each report, closed. The chief
-adds an outcome note when a task finishes: what was delivered, how much rework or blocking it
-took, and a one-line lesson.
+`~/.numbrone/log/<date>.md` is the record of what the chief and its teams got done each day,
+one Markdown file per day. It holds outcomes and decisions, not progress chatter:
+
+- **Milestones**, written by the script as managers report them: queued, blocked, review, done, closed.
+- **Outcomes**, written by the chief when a task finishes: what was delivered, how it went
+  (rework, blocks, time taken), and a one-line lesson.
+- **Decisions**: your answers to blocked questions, priority calls, work sent back. Managers
+  log the decisions they make on your behalf, too.
+- **Feedback and context** you gave the chief.
+
+Workers' step-by-step progress stays in each task file (`numbrone status <task>`), so a day's log
+stays short enough to read in a minute.
 
 ```markdown
 # Work log 2026-11-08
 
-- 15:59 [chief] add-name: queued
-- 16:00 [manager-demo] add-name: spawned worker-add-name on numbrone/add-name
-- 16:00 [worker-add-name] add-name: review: greet.sh takes an optional name ...
-- 16:01 [manager-demo] add-name: review: Branch numbrone/add-name (c880b98) ...
-- 16:02 [chief] add-name (demo): optional name argument, one pass, no rework. Lesson: briefs
-  for this repository should say which branch to base on, since two tasks touched greet.sh.
+- 15:59 [chief] add-name: queued for demo
+- 16:01 [manager-demo] add-name: review: Branch numbrone/add-name (c880b98): greet.sh takes an
+  optional name and falls back to "world". Tests pass.
+- 16:02 [chief] outcome: add-name (demo): optional name argument, one pass, no rework. Lesson: none
+- 16:20 [chief] decision: user accepted add-name; fix-login goes before new-navbar (launch Friday)
+- 16:21 [chief] add-name: closed (branch numbrone/add-name kept)
 ```
+
+Ask the chief "what got done today?" and it answers by project from this file. To skim
+outcomes across days yourself: `grep -h "outcome:" ~/.numbrone/log/*.md`.
 
 Entries are only ever appended, so the log is an audit trail you can trust. It's also how the
 setup gets better over time. Ask the chief for a retro and it reads the log, tells you where work
-stalled or was redone, and proposes changes to its own instructions, the role files, or a
+stalled or was redone and how often, and proposes changes to its own instructions, the role files, or a
 project's context. It only makes them once you agree.
 
 ## Day to day
@@ -278,7 +295,7 @@ The `numbrone` script is a thin wrapper around the herdr CLI:
 | `numbrone status [task]` | Reads task files plus live agent states (`herdr agent get`) |
 | `numbrone close <task>` | `herdr tab close` the worker, `git worktree remove` (keeps the branch) |
 | `numbrone chief` | `herdr agent rename <this pane> chief`, so reports can reach it |
-| `numbrone log ["<note>"]` | Appends a note to today's work log, or prints it |
+| `numbrone log ["<note>" \| <date>]` | Appends a note to today's work log, or prints a day's log |
 
 Worktrees go in `<project>/.numbrone/worktrees/`, listed in the repository's local `.git/info/exclude`. They
 never appear in `git status` or get committed, and agents started there inherit the folder
