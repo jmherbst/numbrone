@@ -7,11 +7,12 @@
 # works only if it reports its status to Rex too (see "Using another agent" in the README).
 AGENT_KIND=claude
 
-# Extra arguments passed to that agent when it starts.
-# Workers wait for you every time they hit a permission prompt (they show as
-# "blocked" in Rex). To let them edit files without asking, for Claude Code:
-#   AGENT_ARGUMENTS="--permission-mode acceptEdits"
-AGENT_ARGUMENTS=""
+# Extra arguments passed to that agent when it starts. The default runs Claude Code in auto mode,
+# which handles permission requests itself (by the rules `claude auto-mode config` prints) instead
+# of stopping to ask you. To approve actions yourself, use "--permission-mode manual": workers then
+# stop at every permission prompt and show as "blocked" in Rex until you answer. These are Claude
+# Code flags, so change them if you change AGENT_KIND.
+AGENT_ARGUMENTS="--permission-mode auto"
 
 # Branch new worktrees start from. Empty = the project's current HEAD.
 BASE_BRANCH=""

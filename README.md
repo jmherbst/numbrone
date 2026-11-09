@@ -339,20 +339,22 @@ Run `numbrone` with no arguments for the full command list.
 `~/.numbrone/settings.sh`:
 
 ```bash
-AGENT_KIND=claude       # the command Rex runs for managers and workers
-AGENT_ARGUMENTS=""      # extra arguments for the agent
-BASE_BRANCH=""          # branch new worktrees start from ("" = project's current HEAD)
-PING_CHIEF=1            # 0 = don't type reports into the chief; just log and notify
+AGENT_KIND=claude                         # the command Rex runs for managers and workers
+AGENT_ARGUMENTS="--permission-mode auto"  # extra arguments for the agent
+BASE_BRANCH=""                            # branch new worktrees start from ("" = project's current HEAD)
+PING_CHIEF=1                              # 0 = don't type reports into the chief; just log and notify
 ```
 
-**Permission prompts.** Workers stop at every permission prompt and show as `blocked` in Rex
-until you answer. That's the safe default. To cut down on prompts with Claude Code, for example:
+**Permission prompts.** Managers and workers run in Claude Code's auto mode by default: Claude Code
+handles permission requests itself, by the rules `claude auto-mode config` prints, instead of
+stopping to ask you. To approve actions yourself, set:
 
 ```bash
-AGENT_ARGUMENTS="--permission-mode acceptEdits"
+AGENT_ARGUMENTS="--permission-mode manual"
 ```
 
-Pick what you're comfortable with. Agents run on your machine with your access.
+Workers then stop at every permission prompt and show as `blocked` in Rex until you answer. Pick
+what you're comfortable with. Agents run on your machine with your access.
 
 **Aliases.** Rex starts agents with your login shell's environment, so your `PATH` applies but
 aliases don't. If you normally run `claude` through an alias that adds flags, put those flags in
@@ -376,7 +378,8 @@ the pane of the agent that sent it.
 
 ## Using another agent
 
-Set `AGENT_KIND` in `settings.sh` to the agent's command (for example `codex`). numbrone follows an
+Set `AGENT_KIND` in `settings.sh` to the agent's command (for example `codex`), and replace
+`AGENT_ARGUMENTS`, whose default (`--permission-mode auto`) is a Claude Code flag. numbrone follows an
 agent only through the state it reports to Rex, so the agent must support Rex's
 [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status). To check,
 start the agent in a Rex tab, then from another Rex terminal find its pane with
@@ -405,7 +408,8 @@ Your projects, tasks, log and knowledge carry over unchanged. Run `numbrone init
 this repository to replace `bin/numbrone`. Since `init` keeps the files you may have edited, your
 `CLAUDE.md` and `roles/*.md` still tell agents to run `herdr agent prompt` and `herdr agent read`:
 change those to `numbrone tell <agent> "<message>"` and `numbrone peek <agent>`, or delete the files
-and run `init` again for fresh copies. Then close the old herdr workspaces and run `numbrone up`.
+and run `init` again for fresh copies. `settings.sh` keeps your `AGENT_ARGUMENTS` too; set it to
+`"--permission-mode auto"` for this fork's default. Then close the old herdr workspaces and run `numbrone up`.
 
 ## Troubleshooting
 

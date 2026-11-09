@@ -130,10 +130,10 @@ time just by telling it things.
 Open `<numbrone-home>/settings.sh` and confirm two settings with the user:
 
 - `AGENT_KIND`: which agent runs managers and workers (default `claude`).
-- `AGENT_ARGUMENTS`: workers stop at every permission prompt and show as `blocked` in Rex. If
-  the user wants fewer interruptions, for Claude Code they can set
-  `AGENT_ARGUMENTS="--permission-mode acceptEdits"`. This is their choice; don't pick it for them.
-  Rex starts agents with the login shell's environment, so shell aliases don't apply. If the user
+- `AGENT_ARGUMENTS`: defaults to `--permission-mode auto`, Claude Code's auto mode, which handles
+  permission requests itself instead of stopping to ask. If the user would rather approve actions
+  themselves, `--permission-mode manual` makes workers stop at every permission prompt and show as
+  `blocked` in Rex. Rex starts agents with the login shell's environment, so shell aliases don't apply. If the user
   runs their agent through an alias that adds flags, ask whether those flags belong here too.
 
 ## 8. Start the managers
