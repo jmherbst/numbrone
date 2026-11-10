@@ -14,7 +14,8 @@ AGENT_KIND=claude
 # Code flags, so change them if you change AGENT_KIND.
 AGENT_ARGUMENTS="--permission-mode auto"
 
-# Branch new worktrees start from. Empty = the project's current HEAD.
+# Branch new worktrees start from, for projects registered without a base of their own
+# (numbrone add <name> <path> "<summary>" [base]). Empty = the project's current HEAD.
 BASE_BRANCH=""
 
 # 1 = managers' blocked/review/done reports are typed into the chief's session.

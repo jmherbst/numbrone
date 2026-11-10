@@ -90,6 +90,11 @@ Then register the project with a one-line summary the chief can route on:
 <numbrone-home>/bin/numbrone add <name> <path> "<one-line summary>"
 ```
 
+Workers branch from the project's checkout. If the project has a remote and its checkout isn't
+kept current (`git fetch` then `git status -sb` shows it behind), register it with its development
+branch on the remote as a fourth argument, such as `origin/develop`. Each spawn then fetches that
+branch and starts the worker from it, without touching the checkout.
+
 Show the user the list (`numbrone projects`) and ask whether the summaries are right.
 
 ## 5. Inputs to watch (optional)

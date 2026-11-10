@@ -26,7 +26,8 @@ numbrone — chief-of-staff workflow on Rex
 
 Setup
   numbrone init <folder>                         create (or upgrade) a numbrone home folder
-  numbrone add <name> <path> "<summary>"         register a project
+  numbrone add <name> <path> "<summary>" [base]  register a project; base is where its workers branch
+                                                 from, such as origin/develop (default: its checkout)
   numbrone remove <name>                         unregister a project
   numbrone projects                              list registered projects
   numbrone up [name]                             start a Rex session + manager for each project
@@ -287,15 +288,19 @@ command_init() {
 }
 
 command_add() {
-  [ $# -eq 3 ] || die 'usage: numbrone add <name> <path> "<summary>"'
+  [ $# -eq 3 ] || [ $# -eq 4 ] || die 'usage: numbrone add <name> <path> "<summary>" [base]'
   load; check_name "$1" 24
-  local root temporary_file
+  local root temporary_file base="${4:-}"
   root="$(git -C "$2" rev-parse --show-toplevel 2>/dev/null)" || die "$2 is not a git repository"
+  [ -z "$base" ] || git -C "$root" rev-parse --verify --quiet "$base^{commit}" >/dev/null ||
+    die "$base isn't a branch or commit in $root (for a remote branch, fetch it first)"
   temporary_file="$(mktemp)"
-  jq --arg name "$1" --arg path "$root" --arg summary "$3" '.[$name] = {path: $path, summary: $summary}' \
+  # Adding a project again updates its path and summary, and keeps its base unless a new one is given.
+  jq --arg name "$1" --arg path "$root" --arg summary "$3" --arg base "$base" \
+    '.[$name] = ((.[$name] // {}) + {path: $path, summary: $summary} + (if $base == "" then {} else {base: $base} end))' \
     "$NUMBRONE_HOME/projects.json" > "$temporary_file" && mv "$temporary_file" "$NUMBRONE_HOME/projects.json"
   mkdir -p "$NUMBRONE_HOME/projects/$1"
-  echo "added $1 → $root"
+  echo "added $1 → $root${base:+ (workers branch from $base)}"
 }
 
 command_remove() {
@@ -374,7 +379,7 @@ EOF
 command_spawn() {
   [ $# -eq 1 ] || die "usage: numbrone spawn <task>"
   load; mux_require
-  local task="$1" file project path session worktree branch
+  local task="$1" file project path session worktree branch base started_from=""
   file="$(task_file "$task")"; [ -f "$file" ] || die "no such task: $task"
   project="$(field "$file" project)"; path="$(project_path "$project")"
   [ "$(mux_state "worker-$task")" = "-" ] || die "worker-$task is already running"
@@ -383,13 +388,21 @@ command_spawn() {
   #    <project>/.numbrone/worktrees/ (hidden via .git/info/exclude, never committed) so the
   #    agent inherits whatever folder trust the user already gave the project.
   worktree="$path/.numbrone/worktrees/$task"; branch="numbrone/$task"
+  base="$(jq -r --arg name "$project" '.[$name].base // empty' "$NUMBRONE_HOME/projects.json")"; base="${base:-$BASE_BRANCH}"
   if [ ! -d "$worktree" ]; then
     local exclude; exclude="$(git -C "$path" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
     grep -qx '.numbrone/worktrees/' "$exclude" 2>/dev/null || { mkdir -p "$(dirname "$exclude")"; echo '.numbrone/worktrees/' >> "$exclude"; }
     if git -C "$path" show-ref --verify --quiet "refs/heads/$branch"; then
       git -C "$path" worktree add -q "$worktree" "$branch"
     else
-      git -C "$path" worktree add -q -b "$branch" "$worktree" ${BASE_BRANCH:+"$BASE_BRANCH"}
+      # A base on a remote, such as origin/develop, is fetched first, so the worker starts from
+      # current code however far behind the project's own checkout is.
+      if [ -n "$base" ] && git -C "$path" remote | grep -qx "${base%%/*}"; then
+        git -C "$path" fetch --quiet "${base%%/*}" "${base#*/}" ||
+          echo "numbrone: couldn't fetch $base, so $task starts from the copy of it already here" >&2
+      fi
+      git -C "$path" worktree add -q --no-track -b "$branch" "$worktree" ${base:+"$base"}
+      started_from=" from ${base:-$(git -C "$path" rev-parse --abbrev-ref HEAD)}"
     fi
   fi
 
@@ -404,7 +417,7 @@ command_spawn() {
   set_field "$file" status working
   set_field "$file" branch "$branch"
   set_field "$file" worktree "$worktree"
-  task_log "$file" "$(mux_whoami)" "spawned worker-$task on $branch"
+  task_log "$file" "$(mux_whoami)" "spawned worker-$task on $branch$started_from"
   echo "spawned worker-$task in $worktree"
 }
 

@@ -47,7 +47,7 @@ No report needed.
 
 - Workers report to you with `[numbrone]` messages.
 - On **review**, check the work: commits (`git -C <worktree> log --oneline`), the diff
-  against the base branch, and the tests. If it isn't right yet, send feedback with
+  against the branch it started from (the task log's `spawned` line names it), and the tests. If it isn't right yet, send feedback with
   `numbrone tell worker-<task> "<feedback>"`. Once it's good, report `review` up to the chief.
 - On **blocked**, unblock the worker yourself if the brief or the codebase has the answer.
   If only the user can decide, report `blocked` up and put the question in the note.

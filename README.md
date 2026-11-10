@@ -262,7 +262,7 @@ Everything is plain files in the numbrone home folder:
 ~/.numbrone/
 ├── CLAUDE.md               the chief's instructions (AGENTS.md links to it)
 ├── settings.sh             which agent to run, with which arguments
-├── projects.json           project index: name → path + one-line summary
+├── projects.json           project index: name → path, one-line summary, optional base
 ├── projects/<name>/
 │   └── context.md          what the project is, its commands, which requests belong to it
 ├── tasks/<task>.md         one file per task: brief, status, append-only log
@@ -302,7 +302,7 @@ Every `rex` call is in one section of the script, the `mux_*` functions:
 | --- | --- |
 | `numbrone up [project]` | `rex new numbrone/<project>` (or `rex window new` in that session if it exists), with the manager agent running in a `manager` tab |
 | `numbrone delegate <project> <task> "<brief>"` | Writes `tasks/<task>.md`, then types a message into `manager-<project>` |
-| `numbrone spawn <task>` | `git worktree add <project>/.numbrone/worktrees/<task> -b numbrone/<task>`, then `rex window new` in the project's session, with a worker agent running in it |
+| `numbrone spawn <task>` | `git worktree add <project>/.numbrone/worktrees/<task> -b numbrone/<task>` from the project's base (fetched first when it's a remote branch such as `origin/develop`), then `rex window new` in the project's session, with a worker agent running in it |
 | `numbrone report <task> <status> "<note>"` | Updates the task file; on `blocked`/`review`/`done` it messages one level up (worker → manager → chief) and asks Rex for a notification |
 | `numbrone status [task]` | Reads task files, plus each agent's state from Rex (`rex block call … program_status`) |
 | `numbrone close <task>` | `rex window close` the worker's tab, `git worktree remove` (keeps the branch) |
@@ -341,7 +341,7 @@ Run `numbrone` with no arguments for the full command list.
 ```bash
 AGENT_KIND=claude                         # the command Rex runs for managers and workers
 AGENT_ARGUMENTS="--permission-mode auto"  # extra arguments for the agent
-BASE_BRANCH=""                            # branch new worktrees start from ("" = project's current HEAD)
+BASE_BRANCH=""                            # where workers branch from if a project sets no base ("" = its HEAD)
 PING_CHIEF=1                              # 0 = don't type reports into the chief; just log and notify
 ```
 
@@ -355,6 +355,17 @@ AGENT_ARGUMENTS="--permission-mode manual"
 
 Workers then stop at every permission prompt and show as `blocked` in Rex until you answer. Pick
 what you're comfortable with. Agents run on your machine with your access.
+
+**Where workers start.** By default a worker's branch starts from the project's own checkout: its
+current HEAD, or `BASE_BRANCH`. If you don't keep that checkout up to date, give the project a base
+when you add it:
+
+```bash
+numbrone add web ~/code/web "<summary>" origin/develop
+```
+
+Each `numbrone spawn` then fetches `develop` and starts the worker from it, and your checkout is
+left alone. Run `numbrone add` again with another base to change it; without one, the base is kept.
 
 **Aliases.** Rex starts agents with your login shell's environment, so your `PATH` applies but
 aliases don't. If you normally run `claude` through an alias that adds flags, put those flags in
